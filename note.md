@@ -194,13 +194,49 @@
   1. **Step 1: Coresidual Check (餘項檢查)**：識別位址中具備天然無衝突潛力的位元特徵（Toggling bits）。
   2. **Step 2: Performing Permutation (執行排列)**：將存取模式劃分為 $R \times d$ 個群組並進行置換。
   3. **Step 3: Developing Group Conflict Graph (Figure 7)**：針對群組建立圖形，將搜尋空間從 $N$ 縮小到與並行度 $d$ 相關。
-* **最終映射函數 (Equation 5)**：
-  $$BI_l = r_l \oplus (\bigoplus_{k=0}^{u} a_{k \cdot m + l} \oplus a_{k \cdot m + l + w})$$
-  * **精妙之處**：將複雜的圖論問題轉化為極簡的 **XOR 縮減 (XOR reduction)** 電路，不再需要複雜的矩陣乘法。
+
+#### 💡 深度補充：邏輯位址與硬體操作對照表
+透過對 Algorithm 4 的解碼，映射函數可拆解為以下硬體操作：
+| 組件 | 數學表達式 | 物理意義與硬體實現 |
+| :--- | :--- | :--- |
+| **位址切片** | $a = a_H \cdot (R \cdot d) + a_M \cdot R + a_L$ | 將 $n$ 位元邏輯位址切分為高位特徵 ($a_H$) 與原始存取意願 ($a_L$)。 |
+| **標籤產生器** | $c = (\sum a_{H,i}) \pmod{R}$ | **Coresidual (MACC 單元)**：利用高位元的位元跳變抽出衝突特徵。在硬體上透過 **XOR 縮減電路** 實現。 |
+| **位址置換** | $BI = (a_L + c) \pmod{R}$ | **Permutation (PM 單元)**：若衝突特徵 $c$ 觸發，則透過 **MUX 與 NOT 閘** 翻轉 $a_L$，將衝突點強制分流。 |
+
+#### 📊 Figure 7：防撞車地圖與 6-bit 衝突路徑演練
+* **全局鎖定機制**：在同一 Clock Cycle 內，所有並行單元的狀態機是全局鎖定的。
+* **實戰案例分析 (N=64, d=2)**：
+    帶入真實抓取位址 $\{0, 4, 8, 12\}$（低位元 $a_L$ 皆為 `00`）：
+    1. **高位特徵**：邏輯地址高位分別為 `000, 000, 001, 001`。
+    2. **控制訊號 $c$**：經過 XOR 縮減，算出標籤 $c$ 分別為 $\{0, 0, 1, 1\}$。
+    3. **分流結果**：`{0, 4}` 映射至原始 Bank；`{8, 12}` 因 $c=1$ 觸發低位元翻轉，被踢去 Bank 2 與 Bank 6，完美避開衝突。
 
 ### 3. 映射器的硬體模型與優勢 (Figure 8 & 9)
 * **硬體模型 (Figure 8)**：展示了 IAP 模式下的模組化設計（Modular Accumulation Unit 和 PM 置換單元），使用 MUX 取代複雜解碼器。
-* **效能優勢 (Figure 9)**：證明了 IAP 模式在 LUT 開銷上遠低於 IEP，特別是在大並行度 $d$ 下，擴展性極佳，且顯著降低了硬體面積。
+* **降維打擊的電路設計 (Strategy 0)**：
+    * **MACC 單元**：拋棄加法器，僅使用 **XOR 閘** 實現 $\sum a_H \pmod{R}$。
+    * **PM 單元**：拋棄除法器，僅使用 **MUX (多工器)** 搭配 **NOT 閘 (反閘)**。
+    * **極致輕量化**：捨棄耗時的 OR/XNOR 閘，用最乾淨的 XOR → MUX 達成最小面積與延遲。
+* **效能優勢 (Figure 9)**：證明了 IAP 模式在 LUT 開銷上遠低於 IEP，特別是在大並行度 $d$ 下，擴展性極佳。
 
 ### 4. 針對 Dilithium 的案例研究與優化 (Algorithm 5)
-* **Algorithm 5 (Improved Barrett Reduction)**：針對 Dilithium 的特定質數 $q=8380417$ 進行優化。透過硬體友善的位移 (Shift) 與加法 (Addition) 取代昂貴的 23 位元乘法，大幅提升運算核心的速度並節省 DSP 資源。
+* **Algorithm 5 (Improved Barrett Reduction)**：針對 Dilithium 的特定質數 $q=8380417$ 進行優化。透過硬體友善的位移 (Shift) 與加法 (Addition) 取代昂貴的 23 位元乘法，大幅提升速度並節省 DSP 資源。
+* **性能與複用分析**：
+    * **Stage 縮減**：由於 Dilithium $N=256=4^4$，採用 Radix-4 架構僅需 4 個 Stage 即收工（Radix-2 需 8 個 Stage）。
+    * **INTT 零成本複用**：利用 NTT 的數學對稱性，原本為 NTT 設計的防撞映射電路可直接供 INTT 使用，不需額外硬體開銷。
+    * **100% 管線利用率**：CFMMS 保證每週期給出 4 筆資料，配合 Barrett Reduction 達成無停滯運算。
+
+### 5. NTT 核心硬體架構與資料流水線 (Figure 4, 5, 6)
+本論文不僅提出映射方案，更展示了完整的高效能加速器架構。
+
+#### A. Top-Level Architecture (Figure 4)
+* **SRAM Banks (左右倉庫)**：根據 $R \times d$ 切割實體 Bank，支援 **In-place Write-back**，確保計算結果直接寫回原始位置。
+* **CFMMS (神經網路/排線)**：部署於記憶體與運算核心之間，負責瞬間翻譯邏輯位址為不衝突的實體編號。
+
+#### B. Radix-4 BFU 微架構 (Figure 5)
+* **交叉加減網路**：透過兩層加減法器網路，榨取數學對稱性，在一週期內免費產生 4 筆新資料。
+* **資料路徑**：資料進入後先經旋轉因子 $\omega$ 乘法，隨即透過 Improved Barrett Reduction 模運算消化。
+
+#### C. AGU 位址產生器 (Figure 6)
+* **低功耗實現**：完全不使用加法器計算跨距。
+* **硬體魔法**：利用計數器 (Counter) 搭配**「線路左移 (Left Shift) 與拼接」**，根據當前 Stage 瞬間吐出變動的邏輯位址（如 $0, 64, 128, 192$）。
